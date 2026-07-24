@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   BookHeart, Save, Smile, Meh, Frown, Flame, Calendar, Trash2, 
   Clock, History, ChevronRight, Sparkles, Tag, Search, Copy, 
-  Check, RefreshCw, Feather, FileText, HeartHandshake, Zap
+  Check, RefreshCw, Feather, FileText, HeartHandshake, Zap,
+  Camera, UploadCloud, Image as ImageIcon, X
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { supabase } from '../lib/supabase';
@@ -15,6 +16,8 @@ interface SavedJournalEntry {
   energy_level: number;
   stress_level: number;
   tags?: string[];
+  photoData?: string; // compressed base64
+  photoKb?: number;
   updated_at: string;
 }
 
@@ -40,6 +43,12 @@ export function Journal() {
   const [stress, setStress] = useState(5);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   
+  // Photo attachment for journal
+  const [journalPhoto, setJournalPhoto] = useState<string | null>(null);
+  const [journalPhotoKb, setJournalPhotoKb] = useState<number>(0);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [saving, setSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -65,23 +74,26 @@ export function Journal() {
   // Clean up journal entries older than retentionDays
   const cleanupOldJournals = (daysLimit: number) => {
     const now = new Date();
+    const todayLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const keysToRemove: string[] = [];
 
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith('journal_')) {
+    Object.keys(localStorage).forEach(key => {
+      if (key.startsWith('journal_')) {
         const datePart = key.replace('journal_', ''); // YYYY-MM-DD
-        const entryDate = new Date(datePart);
-        if (!isNaN(entryDate.getTime())) {
-          const diffInMs = now.getTime() - entryDate.getTime();
-          const diffInDays = diffInMs / (1000 * 60 * 60 * 24);
-          
-          if (diffInDays > daysLimit) {
-            keysToRemove.push(key);
+        const parts = datePart.split('-');
+        if (parts.length === 3) {
+          const entryDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+          if (!isNaN(entryDate.getTime())) {
+            const diffInMs = todayLocal.getTime() - entryDate.getTime();
+            const diffInDays = Math.floor(diffInMs / (1000 * 60 * 60 * 24));
+            
+            if (diffInDays >= daysLimit) {
+              keysToRemove.push(key);
+            }
           }
         }
       }
-    }
+    });
 
     keysToRemove.forEach(k => localStorage.removeItem(k));
   };
@@ -89,9 +101,8 @@ export function Journal() {
   const loadPastJournals = () => {
     const entries: SavedJournalEntry[] = [];
 
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith('journal_')) {
+    Object.keys(localStorage).forEach(key => {
+      if (key.startsWith('journal_')) {
         const datePart = key.replace('journal_', '');
         const savedLocal = localStorage.getItem(key);
         if (savedLocal) {
@@ -105,6 +116,8 @@ export function Journal() {
               energy_level: parsed.energy_level || 5,
               stress_level: parsed.stress_level || 5,
               tags: parsed.tags || [],
+              photoData: parsed.photoData || undefined,
+              photoKb: parsed.photoKb || undefined,
               updated_at: parsed.updated_at || new Date().toISOString(),
             });
           } catch (e) {
@@ -112,7 +125,7 @@ export function Journal() {
           }
         }
       }
-    }
+    });
 
     // Sort descending by date
     entries.sort((a, b) => b.date.localeCompare(a.date));
@@ -130,6 +143,10 @@ export function Journal() {
         setEnergy(parsed.energy_level || 5);
         setStress(parsed.stress_level || 5);
         setSelectedTags(parsed.tags || []);
+        if (parsed.photoData) {
+          setJournalPhoto(parsed.photoData);
+          setJournalPhotoKb(parsed.photoKb || Math.round((parsed.photoData.length * (3 / 4)) / 1024));
+        }
       } catch (e) {
         console.error('Failed to parse local journal', e);
       }
@@ -143,17 +160,81 @@ export function Journal() {
         .limit(1)
         .single();
       
-      if (data) {
-        if (!savedLocal) {
-          setContent(data.content || '');
-          setMood(data.mood ? parseInt(data.mood) : null);
-          setEnergy(data.energy_level || 5);
-          setStress(data.stress_level || 5);
-        }
+      if (data && !savedLocal) {
+        setContent(data.content || '');
+        setMood(data.mood ? parseInt(data.mood) : null);
+        setEnergy(data.energy_level || 5);
+        setStress(data.stress_level || 5);
       }
     } catch (e) {
-      console.log('No journal entry in DB or offline, relying on local storage');
+      console.log('No journal entry in DB or offline');
     }
+  };
+
+  // Image compressor (800px max, 0.65 JPEG)
+  const compressImage = (file: File): Promise<{ compressedBase64: string; compSizeKb: number }> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new Image();
+        img.src = event.target?.result as string;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+          const maxDim = 800;
+
+          if (width > height) {
+            if (width > maxDim) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            }
+          } else {
+            if (height > maxDim) {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+
+          const compressedBase64 = canvas.toDataURL('image/jpeg', 0.65);
+          const compSizeKb = Math.round((compressedBase64.length * (3 / 4)) / 1024);
+
+          resolve({ compressedBase64, compSizeKb });
+        };
+        img.onerror = (err) => reject(err);
+      };
+      reader.onerror = (err) => reject(err);
+    });
+  };
+
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingPhoto(true);
+    try {
+      const { compressedBase64, compSizeKb } = await compressImage(file);
+      setJournalPhoto(compressedBase64);
+      setJournalPhotoKb(compSizeKb);
+      showToast(`Journal photo compressed to ${compSizeKb}KB!`);
+    } catch (err) {
+      console.error('Error compressing image', err);
+      showToast('Error uploading photo.');
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  const removePhoto = () => {
+    setJournalPhoto(null);
+    setJournalPhotoKb(0);
+    showToast('Photo detached.');
   };
 
   const showToast = (msg: string) => {
@@ -172,6 +253,8 @@ export function Journal() {
       energy_level: energy,
       stress_level: stress,
       tags: selectedTags,
+      photoData: journalPhoto || undefined,
+      photoKb: journalPhotoKb || undefined,
       updated_at: new Date().toISOString(),
     };
 
@@ -179,8 +262,19 @@ export function Journal() {
     const now = new Date();
     setLastSaved(now);
 
+    // Also mark journal logged in completed_days_log
+    if (content.trim().length > 0) {
+      const logSaved = localStorage.getItem('completed_days_log');
+      const log: string[] = logSaved ? JSON.parse(logSaved) : [];
+      if (!log.includes(todayStr)) {
+        log.push(todayStr);
+        localStorage.setItem('completed_days_log', JSON.stringify(log));
+      }
+    }
+
     loadPastJournals();
-    showToast('Reflection saved successfully!');
+    setSelectedPastEntry(journalObj);
+    showToast('Journal saved successfully!');
 
     try {
       await supabase.from('journals').insert([{
@@ -190,7 +284,7 @@ export function Journal() {
         stress_level: stress
       }]);
     } catch (e) {
-      console.log('Saved to local storage (Supabase save skipped/failed)', e);
+      console.log('Saved to local storage', e);
     } finally {
       setSaving(false);
     }
@@ -203,6 +297,7 @@ export function Journal() {
       setLessons('');
       setMood(null);
       setSelectedTags([]);
+      setJournalPhoto(null);
     }
     if (selectedPastEntry?.date === dateKey) {
       setSelectedPastEntry(null);
@@ -212,7 +307,7 @@ export function Journal() {
   };
 
   const copyToClipboard = (entry: SavedJournalEntry) => {
-    const text = `Journal Entry (${entry.date})\n\nReflection:\n${entry.content}\n\nLessons:\n${entry.lessons || 'N/A'}`;
+    const text = `Dipesh's Journal (${entry.date})\n\nReflection:\n${entry.content}\n\nLessons:\n${entry.lessons || 'N/A'}`;
     navigator.clipboard.writeText(text);
     setCopiedDate(entry.date);
     setTimeout(() => setCopiedDate(null), 2000);
@@ -266,6 +361,9 @@ export function Journal() {
 
       <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-semibold mb-2">
+            <Sparkles className="w-3.5 h-3.5" /> Dipesh's Reflection Vault
+          </div>
           <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
             <BookHeart className="w-8 h-8 text-blue-500" />
             Daily Journal
@@ -346,7 +444,7 @@ export function Journal() {
             <div className="flex items-center justify-between">
               <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
                 <FileText className="w-4 h-4 text-blue-400" />
-                Today's Reflection ({todayStr})
+                Dipesh's Reflection ({todayStr})
               </label>
               <div className="flex items-center gap-3 text-xs text-slate-500">
                 <span>{wordCount} words</span>
@@ -359,9 +457,51 @@ export function Journal() {
               value={content}
               onChange={(e) => setContent(e.target.value)}
               rows={8}
-              placeholder="Brain dump your thoughts here. What was on your mind today? No filtering needed..."
+              placeholder="Brain dump your thoughts here, Dipesh. What was on your mind today? No filtering needed..."
               className="w-full bg-transparent border border-white/10 rounded-2xl p-4 text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-500 transition-colors resize-none text-sm leading-relaxed"
             />
+
+            {/* Photo Attachment inside Entry */}
+            <div className="pt-2 border-t border-white/5">
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-semibold text-slate-400 flex items-center gap-1.5">
+                  <Camera className="w-3.5 h-3.5 text-blue-400" />
+                  Attach Reflection Photo (Compressed)
+                </label>
+                <input 
+                  ref={fileInputRef}
+                  type="file" 
+                  accept="image/*"
+                  onChange={handlePhotoUpload}
+                  className="hidden" 
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadingPhoto}
+                  className="px-3 py-1 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-slate-300 flex items-center gap-1.5 transition-colors"
+                >
+                  <UploadCloud className="w-3.5 h-3.5" />
+                  {uploadingPhoto ? 'Compressing...' : 'Add Photo'}
+                </button>
+              </div>
+
+              {journalPhoto && (
+                <div className="relative rounded-2xl overflow-hidden bg-black/40 border border-white/10 max-w-xs group mt-2">
+                  <img src={journalPhoto} alt="Journal attachment" className="w-full h-36 object-cover" />
+                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity p-2 flex items-start justify-between">
+                    <span className="text-[10px] bg-blue-500/40 text-blue-200 px-2 py-0.5 rounded-md font-mono">
+                      {journalPhotoKb} KB
+                    </span>
+                    <button
+                      onClick={removePhoto}
+                      className="p-1 rounded-lg bg-rose-500/30 text-rose-300 hover:bg-rose-500/50"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* Tags selector */}
             <div className="pt-2">
@@ -482,7 +622,7 @@ export function Journal() {
           <div className="flex items-center gap-2">
             <History className="w-5 h-5 text-blue-400" />
             <div>
-              <h2 className="text-lg font-bold text-white">Recent Journal Entries</h2>
+              <h2 className="text-lg font-bold text-white">Dipesh's Recent Journal Entries</h2>
               <p className="text-xs text-slate-400">
                 Entries auto-delete after {retentionDays} days to keep your space fresh
               </p>
@@ -558,6 +698,12 @@ export function Journal() {
                     </div>
                   </div>
 
+                  {entry.photoData && (
+                    <div className="rounded-xl overflow-hidden h-24 bg-black/40 border border-white/10 my-1">
+                      <img src={entry.photoData} alt="Entry attachment" className="w-full h-full object-cover" />
+                    </div>
+                  )}
+
                   <p className="text-xs text-slate-300 line-clamp-3 leading-relaxed italic">
                     "{entry.content || 'No reflection text written.'}"
                   </p>
@@ -613,6 +759,12 @@ export function Journal() {
             </div>
 
             <div className="space-y-3 text-sm">
+              {selectedPastEntry.photoData && (
+                <div className="rounded-2xl overflow-hidden max-h-64 bg-black flex justify-center border border-white/10">
+                  <img src={selectedPastEntry.photoData} alt="Journal photo" className="max-h-64 object-contain" />
+                </div>
+              )}
+
               <div>
                 <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Reflection</h4>
                 <p className="text-slate-200 whitespace-pre-wrap bg-black/30 p-4 rounded-2xl text-sm leading-relaxed border border-white/5">

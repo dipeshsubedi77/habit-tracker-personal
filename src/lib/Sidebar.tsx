@@ -46,11 +46,11 @@ export function Sidebar() {
       </nav>
       <div className="p-4 m-4 bg-white/5 rounded-2xl border border-white/10 flex items-center gap-3">
         <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 font-bold">
-          OS
+          D
         </div>
         <div>
-          <p className="text-sm font-medium">Guest User</p>
-          <p className="text-xs text-slate-500">Free Plan</p>
+          <p className="text-sm font-medium">Dipesh</p>
+          <p className="text-xs text-blue-400 font-medium">Personal OS</p>
         </div>
       </div>
     </aside>
