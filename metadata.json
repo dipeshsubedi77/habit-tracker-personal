@@ -1,0 +1,6 @@
+{
+  "name": "Huberman Life OS",
+  "description": "An AI-powered Habit Tracker and Daily Operating System inspired by Andrew Huberman.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
